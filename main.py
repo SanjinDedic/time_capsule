@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 import base64
 import time
 import json
@@ -32,17 +32,6 @@ class Encryption(BaseModel):
     message: str
     key: str
 
-    @field_validator("key")
-    def key_must_be_alphabetic(cls, v):
-        if not v:
-            raise ValueError("Key cannot be empty")
-        if not v.isalpha():
-            raise ValueError(
-                "Key must contain only alphabetic characters (A-Z, a-z). No spaces or special characters allowed."
-            )
-        return v
-
-
 alphabet=['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L',
           'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z']
 
@@ -70,67 +59,39 @@ def vigenere_decrypt(message, key):
     decrypted_message = ""
     key_length = len(key)
     key_index = 0
+    for char in message:
+        if char.isalpha():
+            shift = alphabet.index(key[key_index % key_length])
+            decrypted_char = shift_letter(char, -shift)
+            decrypted_message += decrypted_char
+            key_index += 1
+        else:
+            decrypted_message += char
+    return decrypted_message
 
-    try:
-        for char in message:
-            if char.isalpha():
-                shift = alphabet.index(key[key_index % key_length])
-                decrypted_char = shift_letter(char, -shift)
-                decrypted_message += decrypted_char
-                key_index += 1
-            else:
-                decrypted_message += char
-        return decrypted_message
-    except ValueError as e:
-        raise ValueError(
-            f"Decryption error: Invalid character in key. Only A-Z characters are allowed."
-        )
-    except Exception as e:
-        raise ValueError(f"Decryption error: {str(e)}")
 
 def vigenere_encrypt(message, user_key):
-    try:
-        # Check if all characters in user_key are alphabetic
-        if not user_key.isalpha():
-            raise ValueError("Key must contain only alphabetic characters (A-Z, a-z)")
-
-        key = combine_keys(user_key, SECRET_KEY)
-        key = key.upper()
-        encrypted_message = ""
-        key_length = len(key)
-        key_index = 0
-
-        for char in message:
-            if char.isalpha():
-                shift = alphabet.index(key[key_index % key_length])
-                encrypted_char = shift_letter(char, shift)
-                encrypted_message += encrypted_char
-                key_index += 1
-            else:
-                encrypted_message += char
-        return encrypted_message
-    except ValueError as e:
-        raise ValueError(f"Encryption error: {str(e)}")
-    except Exception as e:
-        raise ValueError(f"Unexpected error during encryption: {str(e)}")
-
-
-@app.get("/")
-async def root():
-    return {"message": "Welcome to the Time Capsule API!"}
+    key = combine_keys(user_key, SECRET_KEY)
+    print(f"Key used for encryption: {key}")
+    key = key.upper()
+    encrypted_message = ""
+    key_length = len(key)
+    key_index = 0
+    for char in message:
+        if char.isalpha():
+            shift = alphabet.index(key[key_index % key_length])
+            encrypted_char = shift_letter(char, shift)
+            encrypted_message += encrypted_char
+            key_index += 1
+        else:
+            encrypted_message += char
+    return encrypted_message
 
 
 @app.post("/submit-capsule")
 async def process_time_capsule(request: TimeCapsuleRequest):
     try:
-        # Add padding if needed for base64 decoding
-        padding_needed = len(request.data) % 4
-        if padding_needed:
-            padded_data = request.data + "=" * (4 - padding_needed)
-        else:
-            padded_data = request.data
-
-        decoded_data = base64.b64decode(padded_data).decode("utf-8")
+        decoded_data = base64.b64decode(request.data + "==").decode("utf-8")
         data_dict = dict(item.split(': ') for item in decoded_data.split(', '))
 
         message = data_dict['message']
@@ -139,14 +100,39 @@ async def process_time_capsule(request: TimeCapsuleRequest):
         locked_by = data_dict['locked_by']
         encryption_method = data_dict['encryption_method']
         user_key = data_dict['user_key']
-        dt_time_created = datetime.datetime.fromtimestamp(time_created)
-        dt_time_revealed = datetime.datetime.fromtimestamp(time_revealed)
 
-        difference_in_seconds = (dt_time_revealed - dt_time_created).total_seconds()
+        # Use UTC timestamps to avoid timezone and DST issues
+        dt_time_created = datetime.datetime.fromtimestamp(
+            time_created, tz=datetime.timezone.utc
+        )
+        dt_time_revealed = datetime.datetime.fromtimestamp(
+            time_revealed, tz=datetime.timezone.utc
+        )
 
-        allowed_intervals = [10 * 86400, 100 * 86400, 1000 * 86400]  # Convert days to seconds
+        # Calculate difference in seconds
+        difference_in_seconds = int(
+            (dt_time_revealed - dt_time_created).total_seconds()
+        )
+        print(f"Difference in seconds: {difference_in_seconds}")
 
-        if difference_in_seconds not in allowed_intervals:
+        # Allowed intervals in seconds (exactly 10, 100, or 1000 days)
+        allowed_intervals = [10 * 86400, 100 * 86400, 1000 * 86400]
+        print(f"Allowed intervals: {allowed_intervals}")
+
+        # Use a simple direct comparison after fixing timezone issues
+        valid_interval = difference_in_seconds in allowed_intervals
+
+        # Alternatively, keep a small tolerance for rounding errors
+        if not valid_interval:
+            tolerance = 10  # 10 seconds tolerance for any remaining rounding errors
+            for interval in allowed_intervals:
+                if abs(difference_in_seconds - interval) <= tolerance:
+                    valid_interval = True
+                    print(f"Close match found: {difference_in_seconds} ≈ {interval}")
+                    break
+
+        if not valid_interval:
+            print(f"No valid interval found. Difference: {difference_in_seconds}")
             return {
                 "message": "WARNING! Time Capsule has been tampered",
                 "time_created": time_created,
@@ -161,6 +147,7 @@ async def process_time_capsule(request: TimeCapsuleRequest):
             if current_time >= time_revealed:
                 if encryption_method == 'vigenere':
                     key = combine_keys(user_key, SECRET_KEY)
+                    print(f"Key used for decryption: {key}")
                     decrypted_message = vigenere_decrypt(message, key)
                     return {
                         "message": decrypted_message,
@@ -175,12 +162,13 @@ async def process_time_capsule(request: TimeCapsuleRequest):
                         status_code=400, detail="Unsupported encryption method"
                     )
             else:
-                time_created_str = time.strftime(
-                    "%d/%m/%Y %I:%M:%S %p", time.localtime(time_created)
-                )
-                time_revealed_str = time.strftime(
-                    "%d/%m/%Y %I:%M:%S %p", time.localtime(time_revealed)
-                )
+                # Format times in UTC to avoid timezone issues in display
+                time_created_str = datetime.datetime.fromtimestamp(
+                    time_created, tz=datetime.timezone.utc
+                ).strftime("%d/%m/%Y %I:%M:%S %p UTC")
+                time_revealed_str = datetime.datetime.fromtimestamp(
+                    time_revealed, tz=datetime.timezone.utc
+                ).strftime("%d/%m/%Y %I:%M:%S %p UTC")
 
                 return {
                     "message": message,
@@ -191,16 +179,8 @@ async def process_time_capsule(request: TimeCapsuleRequest):
                     "user_key": user_key,
                 }
 
-    except KeyError as e:
-        raise HTTPException(
-            status_code=400, detail=f"Missing field in time capsule data: {str(e)}"
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid data format: {str(e)}")
     except Exception as e:
-        raise HTTPException(
-            status_code=400, detail=f"Error processing time capsule: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/vigenere_encrypt")
@@ -208,7 +188,5 @@ async def process_vigenere_encription(request: Encryption):
     try:
         encrypted_message = vigenere_encrypt(request.message, request.key)
         return {"encrypted_message": encrypted_message}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
