@@ -114,6 +114,12 @@ def vigenere_encrypt(message, user_key):
     except Exception as e:
         raise ValueError(f"Unexpected error during encryption: {str(e)}")
 
+
+@app.get("/")
+async def root():
+    return {"message": "Welcome to the Time Capsule API!"}
+
+
 @app.post("/submit-capsule")
 async def process_time_capsule(request: TimeCapsuleRequest):
     try:
